@@ -15,6 +15,90 @@ local KittyVgerCoreVersionRequired = 1.21
 local KittyLoadTime = GetTime()
 local KittyTimerCountdown = 0
 
+-- WoW:Forever returns "secret" values from API calls that can't be compared
+-- with normal Lua operators. This helper coerces them to plain booleans via
+-- pcall; returns true/false on success or nil on error.
+local function KittySafeBool(fn)
+	local ok, val = pcall(function() return fn() and true or false end)
+	if ok then return val end
+	return nil
+end
+
+-- WoW:Forever returns secret numbers from UnitPower, so we count combo points
+-- visually: check the ARTWORK-layer alpha on each dot in Blizzard's ComboFrame.
+local function KittyCountComboDots()
+	-- Find the active combo point bar frame
+	local frame
+	if RogueComboPointBarFrame and KittySafeBool(function() return RogueComboPointBarFrame:IsShown() end) then
+		frame = RogueComboPointBarFrame
+	elseif DruidComboPointBarFrame and KittySafeBool(function() return DruidComboPointBarFrame:IsShown() end) then
+		frame = DruidComboPointBarFrame
+	else
+		frame = ComboFrame
+	end
+	if not frame then return nil, nil end
+
+	-- Hidden frame means zero combo points
+	if KittySafeBool(function() return frame:IsVisible() end) == false then return 0, 5 end
+
+	-- Gather the individual dot sub-frames, trying three sources
+	local dots = {}
+	if type(frame.ComboPoints) == "table" then
+		for i, d in ipairs(frame.ComboPoints) do dots[i] = d end
+	end
+	if #dots == 0 then
+		local name = frame:GetName()
+		if name then
+			for i = 1, 12 do
+				local dot = _G[name .. "ComboPoint" .. i] or _G["ComboPoint" .. i]
+				if dot then dots[#dots + 1] = dot end
+			end
+		end
+	end
+	if #dots == 0 then
+		local ok, children = pcall(function() return { frame:GetChildren() } end)
+		if ok and children then
+			for _, child in ipairs(children) do dots[#dots + 1] = child end
+		end
+	end
+	if #dots == 0 then return nil, nil end
+
+	-- Determine which range of dots to inspect
+	local first, maxCP = 1, math.min(5, #dots)
+	pcall(function()
+		if type(frame.startComboPointIndex) == "number" and frame.startComboPointIndex >= 1 then
+			first = frame.startComboPointIndex
+		end
+		if type(frame.maxComboPoints) == "number" and frame.maxComboPoints >= 1 then
+			maxCP = frame.maxComboPoints
+		end
+	end)
+	local last = math.min(first + maxCP - 1, #dots)
+
+	-- Count lit dots: a dot is "active" when its ARTWORK-layer region has alpha > 0.5
+	local cp = 0
+	for i = first, last do
+		local ok, regions = pcall(function() return { dots[i]:GetRegions() } end)
+		if not ok then return nil, nil end
+		for _, r in ipairs(regions) do
+			local ok2, layer = pcall(function() return r:GetDrawLayer() end)
+			if ok2 and layer == "ARTWORK" then
+				local lit = KittySafeBool(function() return r:GetAlpha() > 0.5 end)
+				if lit == nil then return nil, nil end
+				if lit then cp = cp + 1 end
+				break
+			end
+		end
+	end
+	-- Dots lag the power event, so they show the previous state. If all dots
+	-- are still lit the event must be a spend (can't gain past max), so
+	-- report 0. Otherwise it's a gain and we add one to compensate.
+	if cp >= maxCP then
+		return 0, maxCP
+	end
+	return cp + 1, maxCP
+end
+
 -- Other
 local KittyEverHadBuffCharges = false
 local KittyEverHadHolyPowerCharges = false
@@ -312,6 +396,7 @@ end
 function KittyOnHolyPowerChange()
 	if UnitLevel("player") < 2 then return end -- Can't spend holy power before level 2, so don't play any sounds.
 	local HolyPowerCharges = UnitPower("player", Enum.PowerType.HolyPower)
+	if issecretvalue and issecretvalue(HolyPowerCharges) then return end
 	if (HolyPowerCharges > 0 or KittyEverHadHolyPowerCharges) and (HolyPowerCharges ~= KittyLastSoundPlayed) then
 		-- (No-op if the number actually hasn't changed.)
 		KittyCurrentMaxStacks = UnitPowerMax("player", Enum.PowerType.HolyPower)
@@ -324,6 +409,7 @@ end
 function KittyOnChiChange()
 	if UnitLevel("player") < 3 then return end -- Can't spend chi before level 3, so don't play any sounds.
 	local Chi = UnitPower("player", Enum.PowerType.Chi)
+	if issecretvalue and issecretvalue(Chi) then return end
 	if (Chi > 0 or KittyEverHadChi) and (Chi ~= KittyLastSoundPlayed) then
 		-- (No-op if the number actually hasn't changed.)
 		KittyCurrentMaxStacks = UnitPowerMax("player", Enum.PowerType.Chi) -- usually 4, but can be 5 with the talent Ascension
@@ -335,6 +421,7 @@ end
 
 function KittyOnSoulShardsChange()
 	local SoulShards = UnitPower("player", Enum.PowerType.SoulShards)
+	if issecretvalue and issecretvalue(SoulShards) then return end
 	if SoulShards ~= KittyLastSoundPlayed then
 		-- (No-op if the number actually hasn't changed.)
 		KittyCurrentMaxStacks = UnitPowerMax("player", Enum.PowerType.SoulShards)
@@ -345,6 +432,7 @@ end
 
 function KittyOnArcaneChargesChange()
 	local ArcaneCharges = UnitPower("player", Enum.PowerType.ArcaneCharges)
+	if issecretvalue and issecretvalue(ArcaneCharges) then return end
 	if ArcaneCharges ~= KittyLastSoundPlayed then
 		-- (No-op if the number actually hasn't changed.)
 		KittyCurrentMaxStacks = UnitPowerMax("player", Enum.PowerType.ArcaneCharges)
@@ -465,10 +553,15 @@ function KittyOnComboPointsChange(Unit)
 	if Class == "DRUID" and GetShapeshiftFormID() ~= 1 then return end
 
 	local ComboPoints = UnitPower(Unit, Enum.PowerType.ComboPoints)
+	local maxFromDots
+	if issecretvalue and issecretvalue(ComboPoints) then
+		ComboPoints, maxFromDots = KittyCountComboDots()
+	end
+	if ComboPoints == nil then return end
 	if KittyDebug then VgerCore.Message("KITTYONCOMBOPOINTSCHANGE with Previous: " .. KittyLastComboPoints .. ", now: " .. ComboPoints .. ", last sound: " .. KittyLastSoundPlayed) end
 	if (ComboPoints ~= KittyLastComboPoints) then
 		-- (No-op if the number actually hasn't changed.)
-		KittyCurrentMaxStacks = UnitPowerMax(Unit, Enum.PowerType.ComboPoints)
+		KittyCurrentMaxStacks = maxFromDots or UnitPowerMax(Unit, Enum.PowerType.ComboPoints)
 		VgerCore.Assert(KittyCurrentMaxStacks ~= nil and KittyCurrentMaxStacks > 0, "Hear Kitty: UnitPowerMax for combo points failed")
 		KittyThisResourceDecays = true
 		if KittyCurrentMaxStacks == 10 then
@@ -489,6 +582,7 @@ end
 
 function KittyOnEssenceChange()
 	local Essence = UnitPower("player", Enum.PowerType.Essence)
+	if issecretvalue and issecretvalue(Essence) then return end
 	if Essence > 0 and Essence ~= KittyLastSoundPlayed then
 		-- (No-op if the number actually hasn't changed.)
 		KittyCurrentMaxStacks = UnitPowerMax("player", Enum.PowerType.Essence)
