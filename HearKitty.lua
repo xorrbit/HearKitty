@@ -904,8 +904,8 @@ function KittyAuraStacks(Unit, Filters, SpellID)
 
 	local i
 	for i = 1, BUFF_MAX_DISPLAY do
-		local AuraData = C_UnitAuras.GetAuraDataByIndex(Unit, i, Filters)
-		if not AuraData then break end -- We ran out of buffs
+		local ok, AuraData = pcall(C_UnitAuras.GetAuraDataByIndex, Unit, i, Filters)
+		if not ok or not AuraData then break end -- Error (secret/taint) or ran out of buffs
 		if AuraData.spellId == SpellID then return AuraData.applications end
 		--VgerCore.Message(Unit .. " #" .. i .. ": " .. AuraData.name .. " " .. tostring(AuraData.spellId) .. " x " .. tostring(AuraData.applications))
 	end
